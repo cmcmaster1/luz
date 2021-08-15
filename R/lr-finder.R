@@ -1,3 +1,4 @@
+# Learning rate annealing for lr_finder
 lr_anneal <- torch::lr_scheduler(
   "lr_lambda",
   initialize = function(
@@ -26,6 +27,81 @@ lr_anneal <- torch::lr_scheduler(
       lrs <- as.numeric(self$base_lrs)
     }
     lrs
+  }
+)
+
+# Early stopping callback for lr_finder
+luz_callback_early_stopping_lr_finder <- luz_callback(
+  name = "luz_callback_early_stopping_lr_finder",
+  inherit = monitor_metrics,
+  initialize = function(monitor = "train_loss", min_delta = 0, patience = 0,
+                        mode="min", baseline=NULL) {
+
+    super$initialize(monitor, mode, min_delta)
+
+    self$patience <- patience
+    self$baseline <- baseline
+
+    if (!is.null(self$baseline))
+      self$current_best <- baseline
+
+    self$patience_counter <- 0L
+  },
+
+  on_epoch_end = function() {
+
+    qty <- self$find_quantity()
+    if (is.null(self$current_best))
+      self$current_best <- qty
+
+    if (ctx$get_metric("train", "AvgSmoothLoss", ctx$epoch) > 4*self$current_best) {
+      rlang::signal("Early stopping", class = "early_stopping")
+    }
+  }
+)
+
+#' Internal metric that is used to track smoothed average loss for lr_finder
+#' @noRd
+luz_metric_loss_average_smooth <- luz_metric(
+  abbrev = "AvgSmoothLoss",
+  initialize = function(beta = 0.98) {
+    self$values <- list()
+    self$beta <- beta
+  },
+  update = function(preds, targets) {
+    if (length(ctx$loss) == 1)
+      loss <- ctx$loss[[1]]
+    else
+      loss <- ctx$loss
+
+    self$values[[length(self$values) + 1]] <- loss
+  },
+  average_metric = function(x) {
+    if (is.numeric(x[[1]]) || inherits(x[[1]], "torch_tensor"))
+      x <- sapply(x, self$to_numeric)
+
+    if (is.numeric(x)) {
+      mean(x)
+    } else if (is.list(x)) {
+      lapply(purrr::transpose(x), self$average_metric)
+    } else if (is.null(x)) {
+      NULL
+    } else {
+      rlang::abort(c(
+        "Average metric requires numeric tensor or values or list of them.")
+      )
+    }
+  },
+  compute = function() {
+    torch::torch_lerp(self$average_metric(self$values), ctx$loss, self$beta)
+  },
+  to_numeric = function(x) {
+    if (is.numeric(x))
+      x
+    else if (inherits(x, "torch_tensor"))
+      as.numeric(x$to(device = "cpu"))
+    else
+      rlang::abort("Expected a numeric value or a tensor.")
   }
 )
 
